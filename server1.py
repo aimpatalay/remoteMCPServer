@@ -16,10 +16,18 @@ mcp = FastMCP("ExpenseTracker")
 
 def get_connection():
     """
-    Create a new Postgres connection.
+    Open a new connection to the Postgres expense database.
 
-    DATABASE_URL should look like:
-    postgresql://neondb_owner:YOUR_PASSWORD@POOLER_HOST/neondb?sslmode=require
+    This helper is used internally by every MCP tool that reads from or writes
+    to the expenses table.
+
+    The database URL must point to a Postgres database and should include SSL
+    settings when required by the host.
+
+    Expected format:
+    postgresql://USER:PASSWORD@HOST/DATABASE?sslmode=require
+
+    This is not an MCP tool. The LLM should never call this directly.
     """
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable is not set")
@@ -33,7 +41,13 @@ def get_connection():
 
 def serialize_value(value):
     """
-    Convert Postgres values into JSON friendly values.
+    Convert database values into JSON safe values before returning them to the LLM.
+
+    Postgres can return Decimal, date, and datetime objects. Those types are not
+    always directly JSON serializable, so this helper converts them into simple
+    float or ISO date string values.
+
+    This is not an MCP tool. It is used internally before returning query results.
     """
     if isinstance(value, Decimal):
         return float(value)
@@ -45,12 +59,22 @@ def serialize_value(value):
 
 
 def serialize_row(row: dict):
+    """
+    Convert one Postgres row into a JSON friendly dictionary.
+
+    This is used by list and summary tools before results are returned to the LLM.
+    """
     return {key: serialize_value(value) for key, value in row.items()}
 
 
 def init_db():
     """
-    Create the expenses table if it does not already exist.
+    Initialize the expense tracking database.
+
+    This function creates the expenses table and date index if they do not exist.
+
+    This runs when the server starts. It is not exposed as an MCP tool and should
+    not be called by the LLM.
     """
     try:
         with get_connection() as conn:
@@ -96,15 +120,40 @@ def add_expense(
     note: str = "",
 ):
     """
-    Add a new expense entry to the Postgres database.
+    MCP tool name: add_expense
 
-    Args:
-        user_id: User identifier. For now this is passed in directly.
-        date: Date of the expense in YYYY-MM-DD format.
-        amount: Amount spent.
-        category: Top-level category, for example Transportation.
-        subcategory: Optional subcategory, for example Airline.
-        note: Optional free-text note.
+    Use this tool when the user wants to add, save, record, log, or create a new
+    expense transaction.
+
+    This tool inserts exactly one expense into the Postgres expenses table.
+
+    Good user requests for this tool:
+    "Add $12.50 for lunch today."
+    "Log a $45 Uber ride under Transportation."
+    "Record $120 for groceries on 2026-07-05."
+    "I spent $30 on medicine yesterday."
+
+    Required inputs:
+        user_id: The user identifier for the person who owns this expense.
+        date: The expense date in YYYY-MM-DD format.
+        amount: The amount spent as a number. Do not include a currency symbol.
+        category: The main expense category, such as Food & Dining,
+            Transportation, Shopping, Healthcare, Travel, Business, or Other.
+
+    Optional inputs:
+        subcategory: More specific expense type, such as Groceries, Airline,
+            Uber, Pharmacy, Rent, or Coffee.
+        note: Extra details from the user, such as merchant name, purpose,
+            location, or context.
+
+    Important guidance for the LLM:
+        Use this tool only for adding a new expense.
+        Do not use this tool to retrieve old expenses.
+        Do not use this tool to calculate totals.
+        Do not use this tool to summarize categories.
+        If the user gives a natural date like today or yesterday, convert it
+        to YYYY-MM-DD before calling the tool.
+        If the category is unclear, choose the closest category or use Other.
     """
     try:
         with get_connection() as conn:
@@ -155,12 +204,35 @@ def list_expenses(
     end_date: str,
 ):
     """
-    List expense entries for one user within an inclusive date range.
+    MCP tool name: list_expenses
 
-    Args:
-        user_id: User identifier.
-        start_date: Start date in YYYY-MM-DD format.
-        end_date: End date in YYYY-MM-DD format.
+    Use this tool when the user wants to see individual expense records within
+    a date range.
+
+    This tool returns itemized expenses, not just a total.
+
+    Good user requests for this tool:
+    "Show my expenses from July 1 to July 5."
+    "List all transactions this week."
+    "What did I spend money on yesterday?"
+    "Show my recent expenses."
+
+    Required inputs:
+        user_id: The user identifier whose expenses should be listed.
+        start_date: First date to include, in YYYY-MM-DD format.
+        end_date: Last date to include, in YYYY-MM-DD format.
+
+    Output:
+        A list of matching expense rows ordered by newest date first.
+        Each row includes id, user_id, date, amount, category, subcategory,
+        note, and created_at.
+
+    Important guidance for the LLM:
+        Use this tool when the user wants details or transaction history.
+        Do not use this tool when the user only wants the total amount spent.
+        Do not use this tool when the user wants a category breakdown.
+        If the user says this month, this week, today, or yesterday, convert
+        that phrase into a start_date and end_date before calling the tool.
     """
     try:
         with get_connection() as conn:
@@ -202,13 +274,39 @@ def summarize(
     category: Optional[str] = None,
 ):
     """
-    Summarize expenses by category for one user.
+    MCP tool name: summarize
 
-    Args:
-        user_id: User identifier.
-        start_date: Start date in YYYY-MM-DD format.
-        end_date: End date in YYYY-MM-DD format.
-        category: Optional category filter.
+    Use this tool when the user wants a category level summary or spending
+    breakdown for a date range.
+
+    This tool groups expenses by category and returns the total amount and
+    number of expenses in each category.
+
+    Good user requests for this tool:
+    "Summarize my spending this month."
+    "Break down my expenses by category."
+    "How much did I spend by category last week?"
+    "Summarize only my Travel expenses this year."
+
+    Required inputs:
+        user_id: The user identifier whose expenses should be summarized.
+        start_date: First date to include, in YYYY-MM-DD format.
+        end_date: Last date to include, in YYYY-MM-DD format.
+
+    Optional input:
+        category: Use this only when the user asks for one specific category.
+            If omitted, the tool summarizes all categories.
+
+    Output:
+        A list of category summary rows. Each row includes category,
+        total_amount, and count.
+
+    Important guidance for the LLM:
+        Use this tool for grouped summaries and category breakdowns.
+        Do not use this tool to add a new expense.
+        Do not use this tool when the user wants itemized transaction details.
+        Do not use this tool when the user asks only for one grand total across
+        all categories. For that, use get_total_expenses.
     """
     try:
         with get_connection() as conn:
@@ -262,7 +360,32 @@ def get_total_expenses(
     end_date: str,
 ):
     """
-    Get total expenses for one user within a date range.
+    MCP tool name: get_total_expenses
+
+    Use this tool when the user wants the total amount spent in a date range.
+
+    This tool returns one grand total and the number of matching expense records.
+
+    Good user requests for this tool:
+    "How much did I spend this month?"
+    "What is my total spending today?"
+    "Total my expenses from July 1 to July 5."
+    "How many expenses did I record last week?"
+
+    Required inputs:
+        user_id: The user identifier whose expenses should be totaled.
+        start_date: First date to include, in YYYY-MM-DD format.
+        end_date: Last date to include, in YYYY-MM-DD format.
+
+    Output:
+        user_id, start_date, end_date, total_amount, and count.
+
+    Important guidance for the LLM:
+        Use this tool for one total amount across the whole date range.
+        Do not use this tool to add a new expense.
+        Do not use this tool when the user wants a category breakdown.
+        Do not use this tool when the user wants itemized transaction details.
+        If no expenses exist in the range, the tool returns total_amount as 0.
     """
     try:
         with get_connection() as conn:
@@ -298,6 +421,24 @@ def get_total_expenses(
 
 @mcp.resource("expense:///categories", mime_type="application/json")
 def categories():
+    """
+    MCP resource URI: expense:///categories
+
+    Use this resource when the LLM needs to understand the available expense
+    categories before choosing a category for add_expense or summarize.
+
+    This resource returns a JSON object containing supported spending categories.
+
+    Good use cases:
+    The user asks what categories are available.
+    The user gives an expense and the LLM wants to select the closest category.
+    The user asks to classify an expense before saving it.
+
+    Important guidance for the LLM:
+        This is a resource, not a tool that changes the database.
+        Use this only to read available categories.
+        To save an expense, call add_expense after choosing the category.
+    """
     default_categories = {
         "categories": [
             "Food & Dining",
