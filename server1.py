@@ -477,4 +477,15 @@ if __name__ == "__main__":
         transport="http",
         host="0.0.0.0",
         port=port,
+        path="/mcp",
+        allowed_hosts=[
+            "remotemcpserver.onrender.com",
+        ],
+        allowed_origins=[
+            "https://chatgpt.com",
+            "https://chat.openai.com",
+            "https://claude.ai",
+            "https://claude.com",
+        ],
+        stateless_http=True,
     )
